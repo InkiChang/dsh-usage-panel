@@ -486,6 +486,10 @@ function createHostState(ctx) {
   let config = normalizeConfig(readJson(configFile(), defaultConfig()));
   let state = { providers: {}, refreshedAt: null, refreshing: false, lastError: null };
   let accountInfo = { available: false, signedIn: false, name: '' };
+  /* When accountInfo was last read. The snapshot endpoint serves this cached
+   * value, so a boot-time read that lands before the harness restores the stored
+   * credential would keep reporting "signed out" until the next interval tick. */
+  let accountReadAt = 0;
 
   function getAccount() {
     if (accountService) return accountService;
@@ -497,6 +501,7 @@ function createHostState(ctx) {
   }
 
   async function readAccountInfo() {
+    accountReadAt = Date.now();
     const account = getAccount();
     if (!account || typeof account.getState !== 'function') {
       accountInfo = { available: false, signedIn: false, name: '' };
@@ -519,6 +524,28 @@ function createHostState(ctx) {
       accountInfo = { available: false, signedIn: false, name: '' };
     }
     return accountInfo;
+  }
+
+  /**
+   * Re-read the account state when the cached value is older than `maxAgeMs`.
+   *
+   * The snapshot endpoint serves the cached `accountInfo`, and the only other
+   * writer is `refreshAll()` on the polling interval. So any read that happens
+   * before the harness has restored the stored credential (typical right after a
+   * restart) would otherwise be shown as "未登录 DSH 官方账号" for a whole
+   * interval. Calling this from the state endpoint closes that window, and a
+   * flip back to signed-in re-runs the provider refresh so the official card
+   * fills in immediately instead of waiting for the next tick.
+   *
+   * @param {number} [maxAgeMs] how stale the cached value may be before re-reading
+   * @returns {Promise<{available:boolean,signedIn:boolean,name:string}>}
+   */
+  async function syncAccount(maxAgeMs = 10_000) {
+    if (accountReadAt !== 0 && Date.now() - accountReadAt < maxAgeMs) return accountInfo;
+    const before = accountInfo.signedIn;
+    const next = await readAccountInfo();
+    if (next.signedIn && !before) refreshAll().catch(() => {});
+    return next;
   }
 
   function saveConfig(next) {
@@ -546,7 +573,11 @@ function createHostState(ctx) {
           if (!result) {
             result = {
               status: 'error',
-              error: accountInfo.signedIn ? '官方账号没有返回余额' : '未登录 DSH 官方账号',
+              error: accountInfo.signedIn
+                ? '官方账号没有返回余额'
+                : accountInfo.available
+                  ? '未登录 DSH 官方账号'
+                  : '账号服务尚未就绪，稍后自动重试',
             };
           }
         }
@@ -630,7 +661,7 @@ function createHostState(ctx) {
     };
   }
 
-  return { get config() { return config; }, loadConfig, saveConfig, refreshAll, refreshProvider, snapshot };
+  return { get config() { return config; }, loadConfig, saveConfig, refreshAll, refreshProvider, syncAccount, snapshot };
 }
 
 function weekdayLabel(n) {
@@ -729,8 +760,28 @@ export function apply(ctx) {
     try {
       ctx.inject(['deepseekAccount'], (scope) => {
         accountService = scope.deepseekAccount || null;
-        store.refreshAll().catch(() => {});
+        /* The service is registered before it finishes restoring the stored
+         * credential, so one immediate read can still say "signed out". Retry
+         * with backoff until it flips (or the sign-out turns out to be real),
+         * then refresh the providers so the official card fills in at boot. */
+        let cancelled = false;
+        const wait = (ms) =>
+          new Promise((resolve) => {
+            const timer = setTimeout(resolve, ms);
+            if (timer && typeof timer.unref === 'function') timer.unref();
+          });
+        (async () => {
+          for (const delayMs of [0, 500, 1500, 4000, 10000]) {
+            if (cancelled) return;
+            if (delayMs > 0) await wait(delayMs);
+            if (cancelled) return;
+            const info = await store.syncAccount(0);
+            if (info && info.signedIn) break;
+          }
+          if (!cancelled) store.refreshAll().catch(() => {});
+        })();
         return () => {
+          cancelled = true;
           accountService = null;
         };
       });
@@ -774,6 +825,7 @@ export function apply(ctx) {
         const method = (req.method || 'GET').toUpperCase();
         try {
           if (method === 'GET' && sub === '/state') {
+            await store.syncAccount();
             sendJson(res, 200, store.snapshot());
             return;
           }
