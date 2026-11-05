@@ -1,0 +1,49 @@
+{
+  "name": "dsh-usage-panel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Sidebar usage panel: official key balance and third-party (new-api) balances with today's spend.",
+  "license": "MIT",
+  "author": "InkiChang",
+  "homepage": "https://github.com/InkiChang/dsh-usage-panel#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/InkiChang/dsh-usage-panel.git"
+  },
+  "bugs": {
+    "url": "https://github.com/InkiChang/dsh-usage-panel/issues"
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "usage",
+    "balance",
+    "new-api",
+    "deepseek"
+  ],
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "cordis.patch.yml",
+    "locale/*.json",
+    "icon.svg"
+  ],
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web",
+      "immediately": true,
+      "inject": []
+    }
+  }
+}

@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+
+# Design-tool artifacts (local only)
+.taste-skill/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Logs and scratch files
+*.log
+*.tmp
+*.bak
+npm-debug.log*
+pnpm-debug.log*
+
+# Local environment
+.env
+.env.*

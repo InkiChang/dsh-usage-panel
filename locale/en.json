@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Usage Panel",
+    "description": "Keeps balances and today's spend for the official key and relay sites in the sidebar, with a colour cue during peak hours."
+  }
+}

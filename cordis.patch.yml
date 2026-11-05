@@ -1,0 +1,3 @@
+- insert:
+    - id: usage-panel
+      name: 'dsh-usage-panel'
