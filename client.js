@@ -64,9 +64,39 @@ window.__ModuleLoader__.load({
 }
 .up-anchor::before {
   content: ''; position: absolute; left: 0; right: 0; bottom: 100%; height: 18px;
-  background: linear-gradient(to bottom, transparent, var(--up-plate, var(--dsw-specific-sidebar-fill, var(--dsw-alias-bg-base))));
+  background: linear-gradient(to bottom, transparent, var(--up-plate, var(--dsw-specific-sidebar-fill, var(--dsw-alias-base))));
   pointer-events: none;
 }
+/* Embedded mode: the card is moved into the sidebar's own chip stack, so it is
+   laid out by the host instead of floating above it. Nothing can be painted
+   underneath it any more, which is what the overlay could never guarantee. */
+/* Slot mode: the card still floats (the host's chip stack is not ours to fill
+   with a React node), but a spacer inside that footer reserves exactly its
+   height, so the chips are laid out below it instead of under it. No border:
+   it has to read like the neighbouring chips, not like a panel on top of them. */
+.up-anchor.is-slotted::before { display: none; }
+.up-anchor.is-slotted .up-block { border: 0; border-radius: 6px; }
+/* Text inset is matched to the neighbouring chip's own glyph box, measured at
+   runtime, so the card's first character lines up with the 记忆 label instead
+   of the column edge. */
+.up-anchor.is-slotted .up-face,
+.up-anchor.is-slotted .up-foot {
+  padding-left: var(--up-pad, 9px);
+  padding-right: var(--up-pad, 9px);
+}
+.up-anchor.is-embedded {  position: static; left: auto; bottom: auto;
+  width: 100%; max-width: none; z-index: auto;
+  margin: 0 0 4px;
+}
+.up-anchor.is-embedded::before { display: none; }
+.up-anchor.is-embedded .up-block {
+  border-radius: 7px;
+  padding: 1px 0;
+  background: transparent;
+  border: 1px solid color-mix(in srgb, var(--dsw-alias-label-secondary) 15%, transparent);
+}
+.up-anchor.is-embedded .up-face { padding: 4px 8px 2px; }
+.up-anchor.is-embedded .up-foot { padding: 0 8px 4px; }
 .up-block.is-error .up-balance { color: var(--dsw-alias-label-secondary); }
 .up-face {
   display: flex; align-items: center; justify-content: space-between;
@@ -379,7 +409,16 @@ window.__ModuleLoader__.load({
         if (scheme && scheme.addEventListener) scheme.addEventListener('change', resample);
 
         window.addEventListener('resize', resample, { passive: true });
+        /* The chip stack belongs to the host: a re-render can drop the spacer,
+           and a plugin registering a new chip moves everything. Re-measure on a
+           slow tick instead of observing the whole sidebar's child list. */
+        const keep = setInterval(() => {
+          const anchor = document.querySelector('.up-anchor');
+          const slotted = Boolean(anchor && anchor.classList.contains('is-slotted'));
+          if (slotted && (!slotEl || !slotEl.isConnected)) measureSidebar();
+        }, 900);
         return () => {
+          clearInterval(keep);
           clearTimeout(report);
           clearTimeout(reportTimer);
           clearTimeout(settleA);
@@ -388,6 +427,7 @@ window.__ModuleLoader__.load({
           if (observer) observer.disconnect();
           if (scheme && scheme.removeEventListener) scheme.removeEventListener('change', resample);
           window.removeEventListener('resize', resample);
+          dropSlot();
         };
       }, []);
 
@@ -980,6 +1020,9 @@ window.__ModuleLoader__.load({
           sidebar: sidebarMetrics && sidebarMetrics.hit ? sidebarMetrics.hit : null,
           chain: sidebarMetrics && sidebarMetrics.chain ? sidebarMetrics.chain : [],
           reservedProbe: reserveProbe,
+          /* Where the placement logic actually put the card: the chip stack it
+           * found, the chips inside it, and the reserved slot height. */
+          stack: stackInfo,
           reserved: reserved && reserved.el
             ? {
                 tag: String(reserved.el.tagName || '').toLowerCase(),
@@ -1110,6 +1153,184 @@ window.__ModuleLoader__.load({
       return top;
     }
 
+    /* ---------------------------------------------------- chip stack slot */
+
+    /**
+     * The sidebar's foot is a stack of chips: `记忆` from the auto-memory
+     * plugin, the import entry, the account row, and whatever else a plugin
+     * registers. This block used to float above them, anchored on the `记忆`
+     * label alone — so every chip above that label sat underneath the card and
+     * could not be clicked.
+     *
+     * The fix is to stop guessing an anchor and reserve real space instead:
+     * find the container the chips live in, insert a zero-content spacer as its
+     * first child, and park the card exactly on that spacer. The stack is then
+     * pushed down by the card's own height, so nothing can be painted under it.
+     *
+     * The host owns that container, so every step is defensive: no container or
+     * no chip means the caller falls back to the old anchor.
+     */
+
+    /** Chip labels used to locate the stack. They are never rendered. */
+    const STACK_LABELS = ['记忆', 'Memory', 'Memories'];
+
+    /** Spacer reserved inside the chip stack (null = not embedded). */
+    let slotEl = null;
+    /** Last discovery result, reported to the Host so placement stays checkable. */
+    let stackInfo = { placed: false, why: 'not-scanned', host: null, chips: [], slot: null };
+
+    function chipLabelNodes(column) {
+      const scope = column || document.body;
+      if (!scope || typeof scope.querySelectorAll !== 'function') return [];
+      const out = [];
+      for (const el of scope.querySelectorAll('*')) {
+        if (el.children.length > 0) continue;
+        const text = (el.textContent || '').trim();
+        if (!STACK_LABELS.includes(text)) continue;
+        out.push(el);
+      }
+      return out;
+    }
+
+    function chipsOf(host) {
+      if (!host) return [];
+      return Array.from(host.children).filter(
+        (child) => child !== slotEl && !(child.classList && child.classList.contains('up-anchor')),
+      );
+    }
+
+    /**
+     * Is this element the container that stacks the chips?
+     *
+     * A container qualifies when it spans the column, is short (a footer, not
+     * the whole sidebar), holds few children, and at least one of them is a
+     * card-wide row rather than a square icon.
+     */
+    function scoreStack(el, columnWidth, viewportH) {
+      const rect = el.getBoundingClientRect();
+      if (rect.width < columnWidth * 0.55 || rect.width > columnWidth * 1.2) return null;
+      if (rect.height > viewportH * 0.6) return null;
+      const chips = chipsOf(el);
+      if (chips.length === 0 || chips.length > 8) return null;
+      const cardish = chips.filter((child) => {
+        const r = child.getBoundingClientRect();
+        return r.height >= 14 && r.width >= rect.width * 0.5;
+      });
+      if (cardish.length === 0) return null;
+      const tops = cardish.map((child) => Math.round(child.getBoundingClientRect().top));
+      return { el, chips, cardish, vertical: new Set(tops).size > 1, rect };
+    }
+
+    /**
+     * Walks up from a chip label to the first container that stacks chips.
+     * The nearest qualifying ancestor wins, so a footer column is preferred
+     * over the whole sidebar column (which is rejected for being tall).
+     */
+    function findChipStack(column) {
+      const labels = chipLabelNodes(column);
+      if (!labels.length) return { hit: null, why: 'no-chip-label' };
+      const columnWidth = (column || document.documentElement).getBoundingClientRect().width || 280;
+      const viewportH = window.innerHeight;
+      for (const label of labels) {
+        let node = label.parentElement;
+        for (let depth = 0; node && depth < 8; depth += 1) {
+          if (node === document.body || node === document.documentElement) break;
+          const scored = scoreStack(node, columnWidth, viewportH);
+          if (scored) return { hit: scored, why: 'ok' };
+          node = node.parentElement;
+        }
+      }
+      return { hit: null, why: 'no-stack-container' };
+    }
+
+    /**
+     * Finds the account row at the very bottom of the column (avatar plus user
+     * name). It is the most stable anchor the sidebar offers: it is always the
+     * last thing in the column, so chips plugins add later push in ABOVE it and
+     * this card keeps its place.
+     *
+     * Identified by shape, not by text or class: a short full-width row in the
+     * lower quarter of the column that contains a round image (the avatar).
+     */
+    function findAccountRow(column, columnWidth) {
+      if (!column || typeof column.querySelectorAll !== 'function') return null;
+      const viewportH = window.innerHeight;
+      let best = null;
+      for (const el of column.querySelectorAll('*')) {
+        const rect = el.getBoundingClientRect();
+        if (rect.height < 24 || rect.height > 72) continue;
+        if (rect.width < columnWidth * 0.6) continue;
+        if (rect.top < viewportH * 0.7) continue;
+        const hasAvatar =
+          el.querySelector('img, [class*="avatar" i], [role="img"]') !== null ||
+          /* Fallback for a CSS-only avatar: a small square with a round radius. */
+          Array.from(el.querySelectorAll('*')).some((node) => {
+            const r = node.getBoundingClientRect();
+            if (r.width < 16 || r.width > 40) return false;
+            if (Math.abs(r.width - r.height) > 6) return false;
+            const radius = parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0;
+            return radius >= r.width * 0.35;
+          });
+        if (!hasAvatar) continue;
+        if (best === null || rect.top > best.rect.top) best = { el, rect };
+      }
+      return best;
+    }
+
+    /** Inserts the spacer directly before `ref`, keeping its parent's order. */
+    function ensureSlotBefore(ref) {
+      if (!ref || !ref.parentElement) return null;
+      if (!slotEl) {
+        slotEl = document.createElement('div');
+        slotEl.className = 'up-slot';
+        slotEl.setAttribute('aria-hidden', 'true');
+        slotEl.style.cssText =
+          'flex:none;width:100%;height:0;margin:0;padding:0;pointer-events:none;';
+      }
+      if (slotEl.parentElement === ref.parentElement && slotEl.nextElementSibling === ref) return slotEl;
+      try {
+        ref.parentElement.insertBefore(slotEl, ref);
+      } catch {
+        return null;
+      }
+      return slotEl;
+    }
+
+    /** Inserts (or re-attaches) the spacer as the stack's first child. */
+    function ensureSlot(host) {
+      if (!host) return null;
+      if (slotEl && slotEl.parentElement === host) return slotEl;
+      if (!slotEl) {
+        slotEl = document.createElement('div');
+        slotEl.className = 'up-slot';
+        slotEl.setAttribute('aria-hidden', 'true');
+        slotEl.style.cssText = 'flex:none;width:100%;height:0;margin:0;padding:0;pointer-events:none;';
+      }
+      try {
+        host.insertBefore(slotEl, host.firstElementChild || null);
+      } catch {
+        return null;
+      }
+      return slotEl;
+    }
+
+    function dropSlot() {
+      if (slotEl && slotEl.parentElement) slotEl.parentElement.removeChild(slotEl);
+    }
+
+    function describeChips(chips) {
+      return chips.slice(0, 8).map((child) => {
+        const r = child.getBoundingClientRect();
+        return {
+          tag: String(child.tagName || '').toLowerCase(),
+          cls: typeof child.className === 'string' ? child.className.slice(0, 40) : '',
+          text: (child.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 24),
+          y: Math.round(r.top),
+          h: Math.round(r.height),
+        };
+      });
+    }
+
     /**
      * Resolves the colour the sidebar actually paints behind the block.
      *
@@ -1189,17 +1410,119 @@ window.__ModuleLoader__.load({
         // any leftover override from an older run.
         root.style.removeProperty('--up-plate');
 
-        // A real gap above the memory footer: the footer's own top edge decides
-        // where the block stops, instead of a hard-coded offset that collides.
+        const blockEl = document.querySelector('.up-block');
+        const blockH = blockEl ? Math.round(blockEl.getBoundingClientRect().height) : 0;
+        const anchorEl = document.querySelector('.up-anchor');
+
+        /* Preferred placement: reserve a slot in the host's own footer, directly
+         * above the account row (avatar + user name). That row is the last thing
+         * in the column, so chips added by other plugins land ABOVE this card
+         * instead of pushing it around — the position stays put. */
+        const columnWidth = Math.max(160, Math.round(hit.width));
+        const account = findAccountRow(sidebarEl, columnWidth);
+        const stack = findChipStack(sidebarEl);
+        let slot = null;
+        let anchorKind = '';
+        if (account) {
+          slot = ensureSlotBefore(account.el);
+          anchorKind = 'account-row';
+        }
+        if (!slot && stack.hit) {
+          slot = ensureSlot(stack.hit.el);
+          anchorKind = 'chip-stack';
+        }
+        if (slot && blockH > 0 && slot.parentElement) {
+          slot.style.height = `${blockH}px`;
+          const slotRect = slot.getBoundingClientRect();
+          /* Chips are inset by the footer's own padding, so the column edge is
+           * not where their text starts. Align to the row the card sits above:
+           * same box, same width, same left edge as `记忆` and the account row. */
+          const anchorNode = account ? account.el : stack.hit ? stack.hit.el : null;
+          const anchorRect = anchorNode ? anchorNode.getBoundingClientRect() : null;
+          const boxLeft = anchorRect && anchorRect.width >= 100 ? anchorRect.left : hit.left;
+          const boxWidth =
+            anchorRect && anchorRect.width >= 100 ? anchorRect.width : columnWidth;
+          root.style.setProperty('--up-w', `${Math.round(boxWidth)}px`);
+          root.style.setProperty('--up-x', `${Math.round(boxLeft)}px`);
+          root.style.setProperty(
+            '--up-bottom',
+            `${Math.max(4, Math.round(window.innerHeight - slotRect.bottom))}px`,
+          );
+          if (anchorEl) anchorEl.classList.add('is-slotted');
+          restoreReserved();
+          /* Text-edge reference: the `记忆` label's own glyph box. Reported so
+           * the card's inner padding can be matched to it numerically instead
+           * of by eye. */
+          const labelLeaf = chipLabelNodes(sidebarEl).find((node) => {
+            const r = node.getBoundingClientRect();
+            return r.width > 4 && r.height > 4;
+          });
+          const nameLeaf = document.querySelector('.up-block .up-name');
+          const leafBox = (node) => {
+            if (!node) return null;
+            const r = node.getBoundingClientRect();
+            return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width) };
+          };
+          /* Match the chip's own text inset: the card's glyph box should start
+           * where `记忆` starts, not where the column starts. */
+          if (labelLeaf && boxLeft) {
+            const labelX = labelLeaf.getBoundingClientRect().left;
+            const pad = Math.max(4, Math.min(28, Math.round(labelX - boxLeft)));
+            root.style.setProperty('--up-pad', `${pad}px`);
+          }
+          stackInfo = {
+            placed: true,
+            why: anchorKind,
+            host: {
+              tag: String(slot.parentElement.tagName || '').toLowerCase(),
+              cls:
+                typeof slot.parentElement.className === 'string'
+                  ? slot.parentElement.className.slice(0, 60)
+                  : '',
+              y: Math.round(hostRect.top),
+              w: Math.round(hostRect.width),
+              h: Math.round(hostRect.height),
+            },
+            anchor: anchorRect
+              ? {
+                  y: Math.round(anchorRect.top),
+                  w: Math.round(anchorRect.width),
+                  h: Math.round(anchorRect.height),
+                }
+              : null,
+            chips: describeChips(chipsOf(slot.parentElement)),
+            /* Numeric proof of alignment: where `记忆`'s glyph starts vs where
+             * this card's site name starts. They should match after a pass. */
+            refs: {
+              label: leafBox(labelLeaf),
+              name: leafBox(nameLeaf),
+              pad: root.style.getPropertyValue('--up-pad') || '',
+            },
+            slot: { h: blockH, y: Math.round(slotRect.top), w: Math.round(boxWidth) },
+          };
+          sidebarMetrics.footerTop = Math.round(hostRect.top);
+          sidebarMetrics.bottom = Math.round(window.innerHeight - slotRect.bottom);
+          return chain;
+        }
+
+        /* Fallback: no account row and no chip stack found. Keep the old
+         * footer-top anchor and the scroll reservation so the card still avoids
+         * the one label it knows. */
+        if (anchorEl) anchorEl.classList.remove('is-slotted');
+        dropSlot();
+        stackInfo = {
+          placed: false,
+          why: account ? 'no-slot' : stack.why,
+          host: null,
+          chips: stack.hit ? describeChips(stack.hit.chips) : [],
+          slot: null,
+        };
         const footerTop = findFooterTop(sidebarEl);
         const bottom = footerTop ? Math.max(24, Math.round(viewportH - footerTop + 10)) : 96;
         root.style.setProperty('--up-bottom', `${bottom}px`);
         sidebarMetrics.footerTop = footerTop ? Math.round(footerTop) : null;
         sidebarMetrics.bottom = bottom;
-
-        const blockEl = document.querySelector('.up-block');
-        const blockH = blockEl ? blockEl.getBoundingClientRect().height : 0;
-        reserveScrollSpace(sidebarEl, Math.max(56, Math.round(blockH) + 10));
+        reserveScrollSpace(sidebarEl, Math.max(56, blockH + 10));
         return chain;
       } catch (err) {
         console.error('[usage-panel] layout probe failed', err);
