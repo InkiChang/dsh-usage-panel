@@ -1470,6 +1470,10 @@ window.__ModuleLoader__.load({
             const pad = Math.max(4, Math.min(28, Math.round(labelX - boxLeft)));
             root.style.setProperty('--up-pad', `${pad}px`);
           }
+          /* The spacer's parent may be a zero-size wrapper (display:contents or
+           * an absolutely-positioned shell); it is recorded for diagnostics only,
+           * never used for geometry. */
+          const hostRect = slot.parentElement.getBoundingClientRect();
           stackInfo = {
             placed: true,
             why: anchorKind,
