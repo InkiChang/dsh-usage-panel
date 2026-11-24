@@ -188,7 +188,7 @@ function peakState(config, at = new Date()) {
 
 /* ------------------------------------------------------------------ fetch */
 
-async function fetchJson(url, init, timeoutMs = 15000) {
+async function fetchJson(url, init, timeoutMs = 10000) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -484,7 +484,17 @@ let accountService = null;
 function createHostState(ctx) {
   const configFile = () => path.join(dataDir(), 'config.json');
   let config = normalizeConfig(readJson(configFile(), defaultConfig()));
-  let state = { providers: {}, refreshedAt: null, refreshing: false, lastError: null };
+  let state = { providers: {}, refreshedAt: null, refreshing: false, lastError: null, stale: true };
+
+  /* Seed from the last good snapshot so the card has numbers before the first
+   * network round-trip finishes. Marked stale; the first refresh replaces it. */
+  {
+    const cached = readJson(path.join(dataDir(), 'last-state.json'), null);
+    if (cached && cached.providers && typeof cached.providers === 'object') {
+      state.providers = cached.providers;
+      state.refreshedAt = Number(cached.at) || null;
+    }
+  }
   let accountInfo = { available: false, signedIn: false, name: '' };
   /* When accountInfo was last read. The snapshot endpoint serves this cached
    * value, so a boot-time read that lands before the harness restores the stored
@@ -571,14 +581,34 @@ function createHostState(ctx) {
         } else {
           result = await fetchOfficialFromAccount(getAccount());
           if (!result) {
-            result = {
-              status: 'error',
-              error: accountInfo.signedIn
-                ? '官方账号没有返回余额'
-                : accountInfo.available
-                  ? '未登录 DSH 官方账号'
-                  : '账号服务尚未就绪，稍后自动重试',
-            };
+            /* The account service binds late (it waits for the stored credential
+             * to be restored). Reporting that as an error replaced a perfectly
+             * good cached balance with a message, which is what made the official
+             * row feel slower than the relay rows. Keep the last known numbers
+             * and let the next refresh replace them. */
+            const cached = state.providers[provider.id];
+            if (!accountInfo.available && !accountInfo.signedIn && cached && cached.status === 'ok') {
+              result = {
+                status: 'ok',
+                balance: cached.balance,
+                currency: cached.currency,
+                symbol: cached.symbol,
+                spentToday: cached.spentToday,
+                spentPeak: cached.spentPeak,
+                spentOffpeak: cached.spentOffpeak,
+                spentSource: cached.spentSource,
+                pending: true,
+              };
+            } else {
+              result = {
+                status: 'error',
+                error: accountInfo.signedIn
+                  ? '官方账号没有返回余额'
+                  : accountInfo.available
+                    ? '未登录 DSH 官方账号'
+                    : '账号服务尚未就绪，稍后自动重试',
+              };
+            }
           }
         }
       } else {
@@ -606,6 +636,18 @@ function createHostState(ctx) {
       state.providers = byId;
       state.refreshedAt = Date.now();
       state.lastError = null;
+      state.stale = false;
+      /* Keep the last good numbers on disk: the first fetch after a cold start
+       * or a resume from sleep takes seconds (TLS + DNS), and showing blanks
+       * during that window is what made the panel feel slow. */
+      try {
+        writeJson(path.join(dataDir(), 'last-state.json'), {
+          at: state.refreshedAt,
+          providers: byId,
+        });
+      } catch {
+        /* cache is an optimisation, never a reason to fail a refresh */
+      }
     } catch (error) {
       state.lastError = shortError(error);
     } finally {
@@ -655,6 +697,7 @@ function createHostState(ctx) {
       holidayOverride: config.holidayOverride,
       refreshedAt: refreshed ? refreshed.hhmm : '',
       refreshing: state.refreshing,
+      stale: state.stale === true,
       lastError: state.lastError,
       account: accountInfo,
       providers,

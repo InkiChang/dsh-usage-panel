@@ -75,6 +75,7 @@ window.__ModuleLoader__.load({
    height, so the chips are laid out below it instead of under it. No border:
    it has to read like the neighbouring chips, not like a panel on top of them. */
 .up-anchor.is-slotted::before { display: none; }
+.up-anchor.is-detached { visibility: hidden; pointer-events: none; }
 .up-anchor.is-slotted .up-block { border: 0; border-radius: 6px; }
 /* Text inset is matched to the neighbouring chip's own glyph box, measured at
    runtime, so the card's first character lines up with the 记忆 label instead
@@ -238,14 +239,18 @@ window.__ModuleLoader__.load({
       const [refreshing, setRefreshing] = useState(false);
       const timer = useRef(null);
       const inflight = useRef(false);
+      /* When the last successful fetch finished, used to skip redundant wake-ups. */
+      const lastRefreshAt = useRef(0);
 
       const load = useCallback(async () => {
         try {
           const next = await api('/state');
           setState(next);
           setError('');
+          return next;
         } catch (err) {
           setError(err.message || '读取失败');
+          return null;
         }
       }, []);
 
@@ -267,6 +272,7 @@ window.__ModuleLoader__.load({
         setRefreshing(true);
         try {
           const next = await api('/refresh', { method: 'POST' });
+          lastRefreshAt.current = Date.now();
           setState(next);
           setError('');
         } catch (err) {
@@ -276,6 +282,34 @@ window.__ModuleLoader__.load({
           setRefreshing(false);
         }
       }, []);
+
+      /* Wake-ups: a cold start, a resume from sleep, or coming back to the
+       * window. The host only re-fetches on its own interval (5 min by default),
+       * so without this the card sits on stale numbers after a laptop wakes —
+       * which is exactly when the balances just changed. */
+      useEffect(() => {
+        let cancelled = false;
+        const wake = async () => {
+          if (cancelled) return;
+          if (document.visibilityState === 'hidden') return;
+          if (Date.now() - lastRefreshAt.current < 60_000) {
+            load();
+            return;
+          }
+          await refresh();
+        };
+        load().then((next) => {
+          if (cancelled) return;
+          if (next && next.stale) wake();
+        });
+        document.addEventListener('visibilitychange', wake);
+        window.addEventListener('focus', wake);
+        return () => {
+          cancelled = true;
+          document.removeEventListener('visibilitychange', wake);
+          window.removeEventListener('focus', wake);
+        };
+      }, [load, refresh]);
 
       return { state, error, load, refresh, refreshing };
     }
@@ -409,16 +443,73 @@ window.__ModuleLoader__.load({
         if (scheme && scheme.addEventListener) scheme.addEventListener('change', resample);
 
         window.addEventListener('resize', resample, { passive: true });
-        /* The chip stack belongs to the host: a re-render can drop the spacer,
-           and a plugin registering a new chip moves everything. Re-measure on a
-           slow tick instead of observing the whole sidebar's child list. */
+        /* A window resize is not the only thing that moves the sidebar: the
+         * UI scale setting and the sidebar drag handle change its width with no
+         * resize event at all. Watching the sidebar's own box (and the root, for
+         * scale changes) is what turns those into a re-measure. */
+        let boxObserver = null;
+        if (typeof ResizeObserver === 'function') {
+          boxObserver = new ResizeObserver(resample);
+          try {
+            /* Only the root: observing body would fire on every streaming
+             * message as the conversation column grows. The sidebar's own width
+             * change is caught by the drift check below instead. */
+            boxObserver.observe(document.documentElement);
+          } catch (err) {
+            console.error('[usage-panel] resize observe failed', err);
+          }
+        }
+        /* Keep the card glued to its reserved slot.
+         *
+         * One-shot measurement is not enough: the footer re-lays out for a few
+         * frames after the spacer is inserted (and again on every UI-scale or
+         * rail-width change), so a bottom offset captured mid-flight leaves the
+         * card a dozen pixels off — visible as overlap with whatever sits below.
+         * Copying the slot's rectangle on a short tick makes the card follow the
+         * slot instead of a snapshot of where the slot used to be. */
+        let syncTick = 0;
         const keep = setInterval(() => {
+          syncTick += 1;
           const anchor = document.querySelector('.up-anchor');
           const slotted = Boolean(anchor && anchor.classList.contains('is-slotted'));
-          if (slotted && (!slotEl || !slotEl.isConnected)) measureSidebar();
-        }, 900);
+          if (slotted && slotEl && slotEl.isConnected) {
+            const rect = slotEl.getBoundingClientRect();
+            if (rect.height > 0) {
+              const bottom = Math.max(4, Math.round(window.innerHeight - rect.bottom));
+              document.documentElement.style.setProperty('--up-bottom', `${bottom}px`);
+              if (rect.width > 40) {
+                document.documentElement.style.setProperty('--up-w', `${Math.round(rect.width)}px`);
+                document.documentElement.style.setProperty('--up-x', `${Math.round(rect.left)}px`);
+              }
+              anchor.classList.remove('is-detached');
+            }
+          } else if (anchor) {
+            /* No slot: rather than float at a guessed offset (which lands on the
+             * composer at some window sizes), hide until placement is possible
+             * again. /report keeps the reason. */
+            anchor.classList.add('is-detached');
+          }
+          if (syncTick % 5 !== 0) return;
+          const stale = !slotEl || !slotEl.isConnected;
+          const drifted =
+            slotted &&
+            slotEl &&
+            Math.abs(
+              (document.querySelector('.up-block')?.getBoundingClientRect().height || 0) -
+                slotEl.getBoundingClientRect().height,
+            ) > 2;
+          const column = sidebarEl ? sidebarEl.getBoundingClientRect().width : 0;
+          const resized = lastColumnWidth > 0 && Math.abs(column - lastColumnWidth) > 2;
+          /* Hidden because the column collapsed, or because no slot was found:
+           * as soon as the column is wide enough, try to place the card again. */
+          const hidden = anchor && anchor.classList.contains('is-detached');
+          const canRecover = hidden && (column === 0 || column >= MIN_CARD_WIDTH);
+          if (stale || drifted || resized || canRecover) measureSidebar();
+          lastColumnWidth = column;
+        }, 200);
         return () => {
           clearInterval(keep);
+          if (boxObserver) boxObserver.disconnect();
           clearTimeout(report);
           clearTimeout(reportTimer);
           clearTimeout(settleA);
@@ -1174,6 +1265,11 @@ window.__ModuleLoader__.load({
     /** Chip labels used to locate the stack. They are never rendered. */
     const STACK_LABELS = ['记忆', 'Memory', 'Memories'];
 
+    /* Below this width the sidebar is a rail (~56px) rather than a column.
+     * Two lines of text cannot fit, and shrinking the card to that width only
+     * garbles it, so it is hidden until the column is wide again. */
+    const MIN_CARD_WIDTH = 150;
+
     /** Spacer reserved inside the chip stack (null = not embedded). */
     let slotEl = null;
     /** Last discovery result, reported to the Host so placement stays checkable. */
@@ -1508,45 +1604,76 @@ window.__ModuleLoader__.load({
           slot = ensureSlot(stack.hit.el);
           anchorKind = 'chip-stack';
         }
-        if (slot && blockH > 0 && slot.parentElement) {
-          slot.style.height = `${blockH}px`;
-          const slotRect = slot.getBoundingClientRect();
-          /* Chips are inset by the footer's own padding, so the column edge is
-           * not where their text starts. Align to the row the card sits above:
-           * same box, same width, same left edge as `记忆` and the account row. */
+        if (slot && slot.parentElement) {
+          /* A hidden card (is-detached) still needs to be measured, otherwise
+           * placement can never recover: no height -> no spacer -> stays hidden. */
+          const cardH = blockH > 0 ? blockH : 54;
+          /* Two passes, because the card's height depends on its own width.
+           * After a UI scale-down the first pass sets a narrower width, the
+           * text wraps, the card grows taller — but the spacer was sized from
+           * the pre-wrap height, so the card overflowed the row above it.
+           * Pass 1 applies width/padding, pass 2 measures the wrapped card and
+           * sizes the spacer to that. */
+          slot.style.height = `${cardH}px`;
           const anchorNode = account ? account.el : stack.hit ? stack.hit.el : null;
           const anchorRect = anchorNode ? anchorNode.getBoundingClientRect() : null;
           const boxLeft = anchorRect && anchorRect.width >= 100 ? anchorRect.left : hit.left;
           const boxWidth =
             anchorRect && anchorRect.width >= 100 ? anchorRect.width : columnWidth;
+
+          /* Rail mode (UI scale-down / sidebar collapsed): the column is ~56px,
+           * the two-line card cannot fit, and squeezing it there only garbles
+           * the text. Hide it instead, and let the sync loop bring it back when
+           * the column is wide enough again. */
+          if (boxWidth < MIN_CARD_WIDTH) {
+            dropSlot();
+            if (anchorEl) anchorEl.classList.add('is-detached');
+            restoreReserved();
+            stackInfo = {
+              census: censusOf(sidebarEl),
+              placed: false,
+              why: 'too-narrow',
+              host: null,
+              chips: [],
+              slot: null,
+              width: Math.round(boxWidth),
+            };
+            return chain;
+          }
           root.style.setProperty('--up-w', `${Math.round(boxWidth)}px`);
           root.style.setProperty('--up-x', `${Math.round(boxLeft)}px`);
+          root.style.setProperty('--up-bottom', '4px');
+
+          const labelLeaf = labelsAnywhere(sidebarEl).find((node) => {
+            const r = node.getBoundingClientRect();
+            return r.width > 4 && r.height > 4;
+          });
+          if (labelLeaf && boxLeft) {
+            const labelX = labelLeaf.getBoundingClientRect().left;
+            const pad = Math.max(4, Math.min(28, Math.round(labelX - boxLeft)));
+            root.style.setProperty('--up-pad', `${pad}px`);
+          }
+
+          /* Pass 2: measure the card as it now renders, then give the spacer
+           * exactly that height and pin the card's bottom to the spacer. */
+          const measured = Math.ceil(
+            (anchorEl?.querySelector('.up-block') || anchorEl || slot).getBoundingClientRect()
+              .height || cardH,
+          );
+          if (measured > 0) slot.style.height = `${measured}px`;
+          const slotRect = slot.getBoundingClientRect();
           root.style.setProperty(
             '--up-bottom',
             `${Math.max(4, Math.round(window.innerHeight - slotRect.bottom))}px`,
           );
           if (anchorEl) anchorEl.classList.add('is-slotted');
           restoreReserved();
-          /* Text-edge reference: the `记忆` label's own glyph box. Reported so
-           * the card's inner padding can be matched to it numerically instead
-           * of by eye. */
-          const labelLeaf = labelsAnywhere(sidebarEl).find((node) => {
-            const r = node.getBoundingClientRect();
-            return r.width > 4 && r.height > 4;
-          });
           const nameLeaf = document.querySelector('.up-block .up-name');
           const leafBox = (node) => {
             if (!node) return null;
             const r = node.getBoundingClientRect();
             return { x: Math.round(r.left), y: Math.round(r.top), w: Math.round(r.width) };
           };
-          /* Match the chip's own text inset: the card's glyph box should start
-           * where `记忆` starts, not where the column starts. */
-          if (labelLeaf && boxLeft) {
-            const labelX = labelLeaf.getBoundingClientRect().left;
-            const pad = Math.max(4, Math.min(28, Math.round(labelX - boxLeft)));
-            root.style.setProperty('--up-pad', `${pad}px`);
-          }
           /* The spacer's parent may be a zero-size wrapper (display:contents or
            * an absolutely-positioned shell); it is recorded for diagnostics only,
            * never used for geometry. */
@@ -1580,7 +1707,7 @@ window.__ModuleLoader__.load({
               name: leafBox(nameLeaf),
               pad: root.style.getPropertyValue('--up-pad') || '',
             },
-            slot: { h: blockH, y: Math.round(slotRect.top), w: Math.round(boxWidth) },
+            slot: { h: cardH, y: Math.round(slotRect.top), w: Math.round(boxWidth) },
           };
           sidebarMetrics.footerTop = Math.round(hostRect.top);
           sidebarMetrics.bottom = Math.round(window.innerHeight - slotRect.bottom);
