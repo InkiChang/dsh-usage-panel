@@ -1226,8 +1226,32 @@ window.__ModuleLoader__.load({
      * The nearest qualifying ancestor wins, so a footer column is preferred
      * over the whole sidebar column (which is rejected for being tall).
      */
+    /**
+     * Chips in the left column's lower half.
+     *
+     * The scoped lookup only works while the footer sits inside the element the
+     * probe picked as "the sidebar". A host upgrade can split that column into
+     * several subtrees (2.0.24 turns it into a session-tree region plus a
+     * footer rendered elsewhere), and the scoped lookup then finds nothing at
+     * all. Falling back to a document-wide sweep restricted to the left band and
+     * the lower half keeps this working whichever subtree the footer lives in.
+     */
+    function labelsInLeftBand() {
+      const vh = window.innerHeight;
+      return chipLabelNodes(null).filter((el) => {
+        const rect = el.getBoundingClientRect();
+        return rect.left < 360 && rect.top > vh * 0.4 && rect.width >= 4 && rect.height >= 4;
+      });
+    }
+
+    function labelsAnywhere(column) {
+      const scoped = chipLabelNodes(column);
+      if (scoped.length > 0) return scoped;
+      return labelsInLeftBand();
+    }
+
     function findChipStack(column) {
-      const labels = chipLabelNodes(column);
+      const labels = labelsAnywhere(column);
       if (!labels.length) return { hit: null, why: 'no-chip-label' };
       const columnWidth = (column || document.documentElement).getBoundingClientRect().width || 280;
       const viewportH = window.innerHeight;
@@ -1253,28 +1277,81 @@ window.__ModuleLoader__.load({
      * lower quarter of the column that contains a round image (the avatar).
      */
     function findAccountRow(column, columnWidth) {
-      if (!column || typeof column.querySelectorAll !== 'function') return null;
       const viewportH = window.innerHeight;
-      let best = null;
-      for (const el of column.querySelectorAll('*')) {
+      /**
+       * Scans one scope for a short full-width row holding an avatar. Used twice:
+       * first inside the probed sidebar element, then — when the host split the
+       * footer into a different subtree — across the document's left band.
+       */
+      const scan = (scope, minLeft, maxRight) => {
+        if (!scope || typeof scope.querySelectorAll !== 'function') return null;
+        let found = null;
+        for (const el of scope.querySelectorAll('*')) {
+          if (el.closest && el.closest('.up-anchor')) continue;
+          const rect = el.getBoundingClientRect();
+          if (rect.height < 24 || rect.height > 72) continue;
+          if (rect.width < columnWidth * 0.6) continue;
+          if (rect.top < viewportH * 0.7) continue;
+          if (minLeft !== undefined && rect.left < minLeft) continue;
+          if (maxRight !== undefined && rect.left > maxRight) continue;
+          const hasAvatar =
+            el.querySelector('img, [class*="avatar" i], [role="img"]') !== null ||
+            /* Fallback for a CSS-only avatar: a small square with a round radius. */
+            Array.from(el.querySelectorAll('*')).some((node) => {
+              const r = node.getBoundingClientRect();
+              if (r.width < 16 || r.width > 40) return false;
+              if (Math.abs(r.width - r.height) > 6) return false;
+              const radius = parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0;
+              return radius >= r.width * 0.35;
+            });
+          if (!hasAvatar) continue;
+          if (found === null || rect.top > found.rect.top) found = { el, rect };
+        }
+        return found;
+      };
+      const scoped = column ? scan(column) : null;
+      if (scoped) return scoped;
+      return scan(document.body, 0, 360);
+    }
+
+    /**
+     * Diagnostic dump of everything painted near the bottom of the sidebar.
+     *
+     * The anchor heuristics are guesses about someone else's DOM, and a host
+     * upgrade can invalidate them without any error. This census is what makes
+     * such a break diagnosable: it reports what is actually there instead of
+     * leaving "why: no-chip-label" as the only clue.
+     */
+    function censusOf(column) {
+      const vh = window.innerHeight;
+      /* Document-wide by default: after 2.0.24 the footer sits outside the
+       * element the probe calls "the sidebar", so a scoped census reports an
+       * empty bottom and tells us nothing. Restricted to the left band so the
+       * dump stays readable and stays out of the conversation column. */
+      const scope = document.body || column;
+      if (!scope || typeof scope.querySelectorAll !== 'function') return [];
+      const rows = [];
+      for (const el of scope.querySelectorAll('*')) {
+        if (el.closest && el.closest('.up-anchor')) continue;
         const rect = el.getBoundingClientRect();
-        if (rect.height < 24 || rect.height > 72) continue;
-        if (rect.width < columnWidth * 0.6) continue;
-        if (rect.top < viewportH * 0.7) continue;
-        const hasAvatar =
-          el.querySelector('img, [class*="avatar" i], [role="img"]') !== null ||
-          /* Fallback for a CSS-only avatar: a small square with a round radius. */
-          Array.from(el.querySelectorAll('*')).some((node) => {
-            const r = node.getBoundingClientRect();
-            if (r.width < 16 || r.width > 40) return false;
-            if (Math.abs(r.width - r.height) > 6) return false;
-            const radius = parseFloat(getComputedStyle(node).borderTopLeftRadius) || 0;
-            return radius >= r.width * 0.35;
-          });
-        if (!hasAvatar) continue;
-        if (best === null || rect.top > best.rect.top) best = { el, rect };
+        if (rect.left > 380) continue;
+        if (rect.width < 16 || rect.height < 12) continue;
+        if (rect.bottom < vh - 400 || rect.top > vh + 4) continue;
+        rows.push({
+          tag: String(el.tagName || '').toLowerCase(),
+          cls: typeof el.className === 'string' ? el.className.slice(0, 44) : '',
+          id: el.id || '',
+          aria: el.getAttribute ? el.getAttribute('aria-label') || '' : '',
+          text: (el.textContent || '').trim().replace(/\s+/g, ' ').slice(0, 26),
+          x: Math.round(rect.left),
+          y: Math.round(rect.top),
+          w: Math.round(rect.width),
+          h: Math.round(rect.height),
+          pos: getComputedStyle(el).position,
+        });
       }
-      return best;
+      rows.sort((a, b) => a.y - b.y || a.x - b.x);
+      return rows.slice(0, 120);
     }
 
     /** Inserts the spacer directly before `ref`, keeping its parent's order. */
@@ -1453,7 +1530,7 @@ window.__ModuleLoader__.load({
           /* Text-edge reference: the `记忆` label's own glyph box. Reported so
            * the card's inner padding can be matched to it numerically instead
            * of by eye. */
-          const labelLeaf = chipLabelNodes(sidebarEl).find((node) => {
+          const labelLeaf = labelsAnywhere(sidebarEl).find((node) => {
             const r = node.getBoundingClientRect();
             return r.width > 4 && r.height > 4;
           });
@@ -1475,6 +1552,7 @@ window.__ModuleLoader__.load({
            * never used for geometry. */
           const hostRect = slot.parentElement.getBoundingClientRect();
           stackInfo = {
+            census: censusOf(sidebarEl),
             placed: true,
             why: anchorKind,
             host: {
@@ -1515,6 +1593,7 @@ window.__ModuleLoader__.load({
         if (anchorEl) anchorEl.classList.remove('is-slotted');
         dropSlot();
         stackInfo = {
+          census: censusOf(sidebarEl),
           placed: false,
           why: account ? 'no-slot' : stack.why,
           host: null,
