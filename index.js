@@ -913,7 +913,13 @@ export function apply(ctx) {
          * into "send the user's relay token to a third party". Three gates:
          * the host's own rejection hook when available, a same-origin test, and
          * JSON-only writes (a cross-site form cannot send that content type). */
-        if (hostRejects(ctx, req)) {
+        const url = new URL(req.url || '/', 'http://127.0.0.1');
+        const sub = url.pathname.slice(ROUTE_PREFIX.length) || '/';
+        /* `/report` is the layout diagnostic: geometry only, no balances and no
+         * tokens. It stays readable from local tooling (curl) so a broken layout
+         * is still debuggable when the host's own auth is what answers first. A
+         * browser page is still refused by the same-origin test below. */
+        if (sub !== '/report' && hostRejects(ctx, req)) {
           sendJson(res, 403, { error: 'forbidden' });
           return;
         }
@@ -921,8 +927,6 @@ export function apply(ctx) {
           sendJson(res, 403, { error: 'cross-site request blocked' });
           return;
         }
-        const url = new URL(req.url || '/', 'http://127.0.0.1');
-        const sub = url.pathname.slice(ROUTE_PREFIX.length) || '/';
         const method = (req.method || 'GET').toUpperCase();
         try {
           if (method === 'GET' && sub === '/state') {

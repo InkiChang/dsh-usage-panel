@@ -2,8 +2,13 @@
 
 本项目遵循语义化版本。
 
-## 0.1.6
+## 0.1.7
 
+### 变更
+
+- `/plugin/usage-panel/report`（版面诊断，只含几何信息）不再经过宿主的访问检查，仍保留同源校验。其余路由照旧先走宿主校验：`/state`、`/config` 等从浏览器之外（curl）调用会得到 403，这是宿主在把关，不是插件报错。
+
+## 0.1.6
 ### 修复
 
 - 0.1.5 的同源校验在读取宿主的 `connection` 服务时未声明依赖，宿主会直接抛 `cannot get property "connection" without inject`，导致 `GET /state`、`POST /refresh` 等全部路由返回 400，面板显示「HTTP 400」。现在改为先用 `ctx.get('connection')` 解析服务、并把属性读取包在异常保护里；宿主没有该服务时自然跳到插件自身的同源与 JSON 校验。
