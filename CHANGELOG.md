@@ -2,6 +2,13 @@
 
 本项目遵循语义化版本。
 
+## 0.1.6
+
+### 修复
+
+- 0.1.5 的同源校验在读取宿主的 `connection` 服务时未声明依赖，宿主会直接抛 `cannot get property "connection" without inject`，导致 `GET /state`、`POST /refresh` 等全部路由返回 400，面板显示「HTTP 400」。现在改为先用 `ctx.get('connection')` 解析服务、并把属性读取包在异常保护里；宿主没有该服务时自然跳到插件自身的同源与 JSON 校验。
+- 侧栏宽度缓存 `lastColumnWidth` 未声明就使用，导致客户端抛 `ReferenceError: lastColumnWidth is not defined`，自愈循环中断。已补声明。
+
 ## 0.1.5
 
 ### 安全

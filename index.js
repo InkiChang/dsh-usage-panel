@@ -743,6 +743,29 @@ async function readBody(req) {
  * covers the rest. Requests without either (curl, the plugin's own fetch in
  * some engines) are allowed — they cannot be forged by a web page.
  */
+/**
+ * Asks the host whether it already rejects this request.
+ *
+ * `connection` is a service: reading it without declaring it in `inject` throws
+ * ("cannot get property without inject"), which surfaced as a blanket 400 on
+ * every route once this guard landed. The access stays inside try/catch and the
+ * service is optional, so a host without it simply falls through to the checks
+ * below.
+ */
+function hostRejects(ctx, req) {
+  try {
+    /* `ctx.get` resolves a service without declaring it as a hard dependency,
+     * which is the same pattern used for the account service. The property read
+     * stays as a fallback for hosts whose context has no `get`. */
+    const conn =
+      typeof ctx.get === 'function' ? ctx.get('connection') : ctx.connection;
+    if (!conn || typeof conn.requestRejection !== 'function') return false;
+    return Boolean(conn.requestRejection(req));
+  } catch {
+    return false;
+  }
+}
+
 function sameOriginRequest(req) {
   const headers = req.headers || {};
   const site = String(headers['sec-fetch-site'] || '').toLowerCase();
@@ -890,11 +913,7 @@ export function apply(ctx) {
          * into "send the user's relay token to a third party". Three gates:
          * the host's own rejection hook when available, a same-origin test, and
          * JSON-only writes (a cross-site form cannot send that content type). */
-        const rejection =
-          ctx.connection && typeof ctx.connection.requestRejection === 'function'
-            ? ctx.connection.requestRejection(req)
-            : null;
-        if (rejection) {
+        if (hostRejects(ctx, req)) {
           sendJson(res, 403, { error: 'forbidden' });
           return;
         }

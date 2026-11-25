@@ -468,6 +468,7 @@ window.__ModuleLoader__.load({
          * Copying the slot's rectangle on a short tick makes the card follow the
          * slot instead of a snapshot of where the slot used to be. */
         let syncTick = 0;
+        let lastColumnWidth = 0;
         const keep = setInterval(() => {
           syncTick += 1;
           const anchor = document.querySelector('.up-anchor');
