@@ -1399,8 +1399,15 @@ window.__ModuleLoader__.load({
           if (rect.height < 24 || rect.height > 72) continue;
           if (rect.width < columnWidth * 0.6) continue;
           if (rect.top < viewportH * 0.7) continue;
+          /* It has to be on screen. The document-wide pass used to accept any
+           * wide row holding an avatar, which in a long conversation matched a
+           * message row a thousand pixels below the fold — the spacer then went
+           * into the transcript and the card floated at the viewport bottom. */
+          if (rect.top > viewportH - 8) continue;
+          if (rect.bottom < 0) continue;
           if (minLeft !== undefined && rect.left < minLeft) continue;
           if (maxRight !== undefined && rect.left > maxRight) continue;
+          if (maxRight !== undefined && rect.right > maxRight + 60) continue;
           const hasAvatar =
             el.querySelector('img, [class*="avatar" i], [role="img"]') !== null ||
             /* Fallback for a CSS-only avatar: a small square with a round radius. */
@@ -1674,6 +1681,27 @@ window.__ModuleLoader__.load({
           );
           if (measured > 0) slot.style.height = `${measured}px`;
           const slotRect = slot.getBoundingClientRect();
+          /* Last line of defence: if the slot itself is off screen, the anchor
+           * was wrong (a scrolled-away row). Hiding beats parking the card at
+           * the viewport edge, which is what produced the drifting block. */
+          if (slotRect.bottom < 24 || slotRect.top > window.innerHeight - 24) {
+            dropSlot();
+            if (anchorEl) anchorEl.classList.add('is-detached');
+            restoreReserved();
+            stackInfo = {
+              census: censusOf(sidebarEl),
+              placed: false,
+              why: 'offscreen-slot',
+              host: null,
+              chips: [],
+              slot: null,
+              slotRect: {
+                y: Math.round(slotRect.top),
+                h: Math.round(slotRect.height),
+              },
+            };
+            return chain;
+          }
           root.style.setProperty(
             '--up-bottom',
             `${Math.max(4, Math.round(window.innerHeight - slotRect.bottom))}px`,
