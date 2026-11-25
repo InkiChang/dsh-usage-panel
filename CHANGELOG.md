@@ -2,6 +2,13 @@
 
 本项目遵循语义化版本。
 
+## 0.1.5
+
+### 安全
+
+- 插件的 HTTP 路由增加同源校验：`Sec-Fetch-Site` 为 `cross-site` / `same-site`，或 `Origin` 与本机地址不一致时返回 403；写操作（`POST`）额外要求 `Content-Type: application/json`。此前浏览器里任意网页都可调用这些路由，其中 `POST /config` 可改写某站点的 `baseUrl` 而保留已存令牌，进而在下一次刷新时把令牌发往改后的地址。
+- 宿主提供 `ctx.connection.requestRejection` 时优先使用宿主自身的校验，插件侧校验作为兜底。
+
 ## 0.1.4
 
 ### 新增

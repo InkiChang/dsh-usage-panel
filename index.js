@@ -736,6 +736,26 @@ async function readBody(req) {
   }
 }
 
+/**
+ * Same-origin check for the plugin's own routes.
+ *
+ * `Sec-Fetch-Site` is the reliable signal where the browser sends it; `Origin`
+ * covers the rest. Requests without either (curl, the plugin's own fetch in
+ * some engines) are allowed — they cannot be forged by a web page.
+ */
+function sameOriginRequest(req) {
+  const headers = req.headers || {};
+  const site = String(headers['sec-fetch-site'] || '').toLowerCase();
+  if (site && site !== 'same-origin' && site !== 'none') return false;
+  const origin = headers.origin;
+  if (!origin) return true;
+  try {
+    return new URL(origin).host === headers.host;
+  } catch {
+    return false;
+  }
+}
+
 function sendJson(res, status, value) {
   const text = JSON.stringify(value);
   res.statusCode = status;
@@ -863,6 +883,25 @@ export function apply(ctx) {
       kind: 'prefix',
       path: ROUTE_PREFIX,
       handler: async (req, res) => {
+        /* These routes read balances and can rewrite provider config, and the
+         * web server is reachable from ordinary pages. Without a check, a page
+         * open in the browser could POST a config whose baseUrl points at the
+         * attacker while the stored token is kept — which turns "read a number"
+         * into "send the user's relay token to a third party". Three gates:
+         * the host's own rejection hook when available, a same-origin test, and
+         * JSON-only writes (a cross-site form cannot send that content type). */
+        const rejection =
+          ctx.connection && typeof ctx.connection.requestRejection === 'function'
+            ? ctx.connection.requestRejection(req)
+            : null;
+        if (rejection) {
+          sendJson(res, 403, { error: 'forbidden' });
+          return;
+        }
+        if (!sameOriginRequest(req)) {
+          sendJson(res, 403, { error: 'cross-site request blocked' });
+          return;
+        }
         const url = new URL(req.url || '/', 'http://127.0.0.1');
         const sub = url.pathname.slice(ROUTE_PREFIX.length) || '/';
         const method = (req.method || 'GET').toUpperCase();
@@ -870,6 +909,10 @@ export function apply(ctx) {
           if (method === 'GET' && sub === '/state') {
             await store.syncAccount();
             sendJson(res, 200, store.snapshot());
+            return;
+          }
+          if (method === 'POST' && !String(req.headers['content-type'] || '').toLowerCase().includes('application/json')) {
+            sendJson(res, 415, { error: '需要 application/json' });
             return;
           }
           if (method === 'POST' && sub === '/refresh') {

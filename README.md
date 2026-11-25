@@ -140,6 +140,7 @@ plugin_manager action=install_bundle target="C:\path\to\dsh-usage-panel"
 - 令牌只写本机配置文件，界面上只显示前三位与后四位（例如 `abc…wxyz`）。
 - Windows 上 `chmod 600` 不生效，配置文件的实际保护来自用户目录权限；插件仍会尝试设置，失败不影响使用。
 - 插件提供的是本机只读诊断接口 `GET /plugin/usage-panel/report`，内容仅为版面几何信息，不含令牌。
+- 插件的 HTTP 路由只接受同源请求：跨站页面发起的请求会被拒绝（403），写操作还要求 `application/json`。宿主提供 `ctx.connection.requestRejection` 时还会先走宿主自己的检查。这样浏览器里任意一个网页都无法读取余额、或通过改写站点地址把你的令牌带到别处。
 
 ## 已知限制
 
