@@ -478,9 +478,14 @@ window.__ModuleLoader__.load({
             if (rect.height > 0) {
               const bottom = Math.max(4, Math.round(window.innerHeight - rect.bottom));
               document.documentElement.style.setProperty('--up-bottom', `${bottom}px`);
-              if (rect.width > 40) {
-                document.documentElement.style.setProperty('--up-w', `${Math.round(rect.width)}px`);
-                document.documentElement.style.setProperty('--up-x', `${Math.round(rect.left)}px`);
+              /* Width and left come from the sidebar column, never from the
+               * spacer's own box: in fullscreen the footer container can span
+               * the whole window, and copying its width stretched the card over
+               * the composer. Only the vertical offset is the spacer's job. */
+              if (boxGeom) {
+                const width = Math.max(160, Math.min(boxGeom.width, Math.round(rect.width) || boxGeom.width));
+                document.documentElement.style.setProperty('--up-w', `${width}px`);
+                document.documentElement.style.setProperty('--up-x', `${boxGeom.left}px`);
               }
               anchor.classList.remove('is-detached');
             }
@@ -1276,6 +1281,11 @@ window.__ModuleLoader__.load({
     /** Last discovery result, reported to the Host so placement stays checkable. */
     let stackInfo = { placed: false, why: 'not-scanned', host: null, chips: [], slot: null };
 
+    /* The box the card should occupy, measured from the sidebar column. The
+     * spacer may be wider than that (a full-width footer container), so width
+     * and left are kept here and reused by the sync loop. */
+    let boxGeom = null;
+
     function chipLabelNodes(column) {
       const scope = column || document.body;
       if (!scope || typeof scope.querySelectorAll !== 'function') return [];
@@ -1641,6 +1651,7 @@ window.__ModuleLoader__.load({
             };
             return chain;
           }
+          boxGeom = { left: Math.round(boxLeft), width: Math.round(boxWidth) };
           root.style.setProperty('--up-w', `${Math.round(boxWidth)}px`);
           root.style.setProperty('--up-x', `${Math.round(boxLeft)}px`);
           root.style.setProperty('--up-bottom', '4px');
